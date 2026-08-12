@@ -1,5 +1,5 @@
-// Package auth отвечает за регистрацию, авторизацию и аутентификацию
-// пользователей: хранит пароли в виде bcrypt-хешей и выдаёт JWT-токены.
+// Package auth отвечает за авторизацию и аутентификацию: проверяет пароли
+// и выдаёт JWT-токены. Создание пользователя живёт в пакете registration.
 package auth
 
 import (
@@ -10,6 +10,7 @@ import (
 	"tinyURL/internal/models"
 	"tinyURL/internal/models/repo"
 	userrepo "tinyURL/internal/models/userRepo"
+	"tinyURL/internal/validate"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -78,55 +79,6 @@ func New(repo userrepo.UserRepo, secretKey string, opts ...Option) (*Service, er
 	return s, nil
 }
 
-// Register создаёт нового пользователя и сразу возвращает его вместе с токеном,
-// чтобы клиенту не нужно было отдельно логиниться после регистрации.
-func (s *Service) Register(ctx context.Context, name, email, password string) (*models.User, string, error) {
-	name, err := validateName(name)
-	if err != nil {
-		return nil, "", err
-	}
-
-	email, err = validateEmail(email)
-	if err != nil {
-		return nil, "", err
-	}
-
-	if err := validatePassword(password); err != nil {
-		return nil, "", err
-	}
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), s.bcryptCost)
-	if err != nil {
-		return nil, "", err
-	}
-
-	user := &models.User{
-		Name:     name,
-		Password: string(hash),
-		Email:    email,
-	}
-
-	// На гонку двух одновременных регистраций полагаемся на UNIQUE в БД,
-	// а не на предварительную проверку "есть ли такой пользователь".
-	id, err := s.repo.CreateUser(ctx, user)
-	if err != nil {
-		if errors.Is(err, repo.ErrAlreadyExists) {
-			return nil, "", ErrUserExists
-		}
-		return nil, "", err
-	}
-
-	user.ID = id
-	user.Password = ""
-
-	token, err := s.GenerateToken(user.ID, user.Name)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return user, token, nil
-}
-
 // Login проверяет учётные данные и возвращает токен. В качестве логина
 // принимается имя пользователя или email.
 func (s *Service) Login(ctx context.Context, login, password string) (*models.User, string, error) {
@@ -184,12 +136,14 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*models.User,
 
 // findByLogin ищет пользователя по email, если логин похож на адрес, иначе по имени.
 func (s *Service) findByLogin(ctx context.Context, login string) (*models.User, error) {
-	if email, err := validateEmail(login); err == nil {
+	if email, err := validate.Email(login); err == nil {
 		return s.repo.GetUserByEmail(ctx, email)
 	}
 
-	name, err := validateName(login)
+	name, err := validate.Name(login)
 	if err != nil {
+		// Логин не проходит даже базовую проверку — такого пользователя
+		// заведомо нет, в базу идти незачем.
 		return nil, repo.ErrNotFound
 	}
 

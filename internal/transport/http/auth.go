@@ -8,6 +8,8 @@ import (
 
 	"tinyURL/internal/models"
 	"tinyURL/internal/services/auth"
+	"tinyURL/internal/services/registration"
+	"tinyURL/internal/validate"
 )
 
 var (
@@ -21,11 +23,12 @@ const maxBodySize = 1 << 20 // 1 MiB
 
 // AuthHandler — HTTP-ручки сервиса пользователей.
 type AuthHandler struct {
-	service *auth.Service
+	service      *auth.Service
+	registration *registration.Service
 }
 
-func NewAuthHandler(service *auth.Service) *AuthHandler {
-	return &AuthHandler{service: service}
+func NewAuthHandler(service *auth.Service, reg *registration.Service) *AuthHandler {
+	return &AuthHandler{service: service, registration: reg}
 }
 
 // Register навешивает ручки сервиса пользователей на мультиплексор.
@@ -64,7 +67,7 @@ func (h *AuthHandler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, token, err := h.service.Register(r.Context(), req.Name, req.Email, req.Password)
+	user, token, err := h.registration.Register(r.Context(), req.Name, req.Email, req.Password)
 	if err != nil {
 		h.writeAuthError(w, err)
 		return
@@ -118,14 +121,14 @@ func (h *AuthHandler) writeAuthError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, err)
 	case errors.Is(err, auth.ErrInvalidToken):
 		writeError(w, http.StatusUnauthorized, err)
-	case errors.Is(err, auth.ErrUserExists):
+	case errors.Is(err, registration.ErrUserExists):
 		writeError(w, http.StatusConflict, err)
-	case errors.Is(err, auth.ErrEmptyName),
-		errors.Is(err, auth.ErrShortName),
-		errors.Is(err, auth.ErrLongName),
-		errors.Is(err, auth.ErrInvalidEmail),
-		errors.Is(err, auth.ErrShortPassword),
-		errors.Is(err, auth.ErrLongPassword):
+	case errors.Is(err, validate.ErrEmptyName),
+		errors.Is(err, validate.ErrShortName),
+		errors.Is(err, validate.ErrLongName),
+		errors.Is(err, validate.ErrInvalidEmail),
+		errors.Is(err, validate.ErrShortPassword),
+		errors.Is(err, validate.ErrLongPassword):
 		writeError(w, http.StatusBadRequest, err)
 	default:
 		log.Printf("auth: internal error: %s", err)

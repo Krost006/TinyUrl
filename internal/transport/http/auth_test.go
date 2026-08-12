@@ -10,8 +10,10 @@ import (
 
 	"tinyURL/internal/models"
 	"tinyURL/internal/models/repo"
+	userrepo "tinyURL/internal/models/userRepo"
 	"tinyURL/internal/services/auth"
 
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -40,6 +42,9 @@ func (r *memRepo) CreateUser(_ context.Context, u *models.User) (int, error) {
 
 	return id, nil
 }
+
+// WithTx для мока в памяти ничего не меняет: транзакций тут нет.
+func (r *memRepo) WithTx(pgx.Tx) userrepo.UserRepo { return r }
 
 func (r *memRepo) GetUserById(_ context.Context, id int) (*models.User, error) {
 	u, ok := r.users[id]
@@ -71,18 +76,45 @@ func (r *memRepo) find(match func(*models.User) bool) (*models.User, error) {
 	return nil, repo.ErrNotFound
 }
 
-func newTestServer(t *testing.T) http.Handler {
+// newTestServer поднимает роутер поверх моков и возвращает его вместе с
+// репозиторием, чтобы тест мог завести пользователя напрямую.
+//
+// Ручка регистрации здесь не работает: registration.Service требует настоящий
+// *pgxpool.Pool для Begin, а транзакцию мок не эмулирует. Регистрация
+// проверяется интеграционно, на живой базе.
+func newTestServer(t *testing.T) (http.Handler, *memRepo) {
 	t.Helper()
 
-	service, err := auth.New(newMemRepo(), "test-secret", auth.WithBcryptCost(bcrypt.MinCost))
+	users := newMemRepo()
+
+	service, err := auth.New(users, "test-secret", auth.WithBcryptCost(bcrypt.MinCost))
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	NewAuthHandler(service).Routes(mux)
+	NewAuthHandler(service, nil).Routes(mux)
 
-	return mux
+	return mux, users
+}
+
+// addUser кладёт пользователя в репозиторий, минуя ручку регистрации.
+func addUser(t *testing.T, r *memRepo, name, email, password string) {
+	t.Helper()
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+
+	_, err = r.CreateUser(context.Background(), &models.User{
+		Name:     name,
+		Email:    email,
+		Password: string(hash),
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
 }
 
 func do(t *testing.T, h http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
@@ -101,35 +133,21 @@ func do(t *testing.T, h http.Handler, method, path, body, token string) *httptes
 	return rec
 }
 
-func TestRegisterAndLoginFlow(t *testing.T) {
-	h := newTestServer(t)
+func TestLoginAndMeFlow(t *testing.T) {
+	h, users := newTestServer(t)
 
-	rec := do(t, h, http.MethodPost, "/api/auth/register",
-		`{"name":"krost","email":"krost@example.com","password":"password123"}`, "")
+	addUser(t, users, "krost", "krost@example.com", "password123")
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("register status = %d, body = %s", rec.Code, rec.Body)
-	}
-
-	var registered authResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &registered); err != nil {
-		t.Fatalf("decode register response: %v", err)
-	}
-
-	if registered.Token == "" {
-		t.Fatal("register returned no token")
-	}
-
-	// Ответ не должен содержать пароль ни в каком виде.
-	if strings.Contains(rec.Body.String(), "password") {
-		t.Errorf("register response mentions password: %s", rec.Body)
-	}
-
-	rec = do(t, h, http.MethodPost, "/api/auth/login",
+	rec := do(t, h, http.MethodPost, "/api/auth/login",
 		`{"login":"krost","password":"password123"}`, "")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login status = %d, body = %s", rec.Code, rec.Body)
+	}
+
+	// Ответ не должен содержать пароль ни в каком виде.
+	if strings.Contains(rec.Body.String(), "password") {
+		t.Errorf("login response mentions password: %s", rec.Body)
 	}
 
 	var loggedIn authResponse
@@ -153,11 +171,9 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 }
 
 func TestStatusCodes(t *testing.T) {
-	h := newTestServer(t)
+	h, users := newTestServer(t)
 
-	// Готовим существующего пользователя.
-	do(t, h, http.MethodPost, "/api/auth/register",
-		`{"name":"krost","email":"krost@example.com","password":"password123"}`, "")
+	addUser(t, users, "krost", "krost@example.com", "password123")
 
 	tests := []struct {
 		name         string
@@ -165,13 +181,7 @@ func TestStatusCodes(t *testing.T) {
 		body, token  string
 		want         int
 	}{
-		{"duplicate user", http.MethodPost, "/api/auth/register",
-			`{"name":"krost","email":"krost@example.com","password":"password123"}`, "", http.StatusConflict},
-		{"invalid email", http.MethodPost, "/api/auth/register",
-			`{"name":"other","email":"nope","password":"password123"}`, "", http.StatusBadRequest},
-		{"short password", http.MethodPost, "/api/auth/register",
-			`{"name":"other","email":"o@example.com","password":"x"}`, "", http.StatusBadRequest},
-		{"malformed json", http.MethodPost, "/api/auth/register", `{"name":`, "", http.StatusBadRequest},
+		{"malformed json", http.MethodPost, "/api/auth/login", `{"login":`, "", http.StatusBadRequest},
 		{"unknown field", http.MethodPost, "/api/auth/login",
 			`{"login":"krost","password":"password123","admin":true}`, "", http.StatusBadRequest},
 		{"wrong password", http.MethodPost, "/api/auth/login",
@@ -194,7 +204,7 @@ func TestStatusCodes(t *testing.T) {
 }
 
 func TestRequireAuthRejectsNonBearerScheme(t *testing.T) {
-	h := newTestServer(t)
+	h, _ := newTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 	req.Header.Set("Authorization", "Basic a3Jvc3Q6cGFzcw==")

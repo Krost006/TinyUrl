@@ -12,7 +12,7 @@ type User struct {
 type Href struct {
 	ID      int
 	URL     string
-	LongURL string
+	LongURL *string
 }
 
 type UserHref struct {

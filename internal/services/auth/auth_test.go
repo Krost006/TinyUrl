@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"tinyURL/internal/models/repo"
 	userrepo "tinyURL/internal/models/userRepo"
 
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -45,6 +45,10 @@ func (r *memRepo) CreateUser(_ context.Context, u *models.User) (int, error) {
 
 	return id, nil
 }
+
+// WithTx для мока в памяти ничего не меняет: транзакций тут нет,
+// а откат в тестах не проверяется.
+func (r *memRepo) WithTx(pgx.Tx) userrepo.UserRepo { return r }
 
 func (r *memRepo) GetUserById(_ context.Context, id int) (*models.User, error) {
 	if r.err != nil {
@@ -98,97 +102,41 @@ func newTestService(t *testing.T, repo userrepo.UserRepo, opts ...Option) *Servi
 	return s
 }
 
+// addUser кладёт в репозиторий пользователя с захешированным паролем.
+// Регистрация живёт в пакете registration, поэтому тестам auth нужен
+// собственный способ завести подопытного.
+func addUser(t *testing.T, r *memRepo, name, email, password string) *models.User {
+	t.Helper()
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+
+	user := &models.User{Name: name, Email: email, Password: string(hash)}
+
+	id, err := r.CreateUser(context.Background(), user)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	user.ID = id
+
+	return user
+}
+
 func TestNewRequiresSecret(t *testing.T) {
 	if _, err := New(newMemRepo(), ""); !errors.Is(err, ErrEmptySecretKey) {
 		t.Fatalf("got %v, want ErrEmptySecretKey", err)
 	}
 }
 
-func TestRegisterStoresHashedPassword(t *testing.T) {
+func TestLogin(t *testing.T) {
 	repo := newMemRepo()
 	s := newTestService(t, repo)
-
-	user, token, err := s.Register(context.Background(), "krost", "KROST@example.com", "password123")
-	if err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	if user.ID == 0 {
-		t.Error("user ID was not set from repo")
-	}
-
-	if token == "" {
-		t.Error("expected a token")
-	}
-
-	if user.Password != "" {
-		t.Errorf("password hash leaked in returned user: %q", user.Password)
-	}
-
-	// email нормализуется к нижнему регистру
-	if user.Email != "krost@example.com" {
-		t.Errorf("email = %q, want krost@example.com", user.Email)
-	}
-
-	stored := repo.users[user.ID]
-	if stored.Password == "password123" {
-		t.Fatal("password stored in plaintext")
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(stored.Password), []byte("password123")); err != nil {
-		t.Fatalf("stored hash does not match original password: %v", err)
-	}
-}
-
-func TestRegisterValidation(t *testing.T) {
-	tests := []struct {
-		name        string
-		user, email string
-		password    string
-		want        error
-	}{
-		{"empty name", "", "a@example.com", "password123", ErrEmptyName},
-		{"short name", "ab", "a@example.com", "password123", ErrShortName},
-		{"long name", strings.Repeat("a", 33), "a@example.com", "password123", ErrLongName},
-		{"bad email", "krost", "not-an-email", "password123", ErrInvalidEmail},
-		{"empty email", "krost", "", "password123", ErrInvalidEmail},
-		{"short password", "krost", "a@example.com", "short", ErrShortPassword},
-		{"long password", "krost", "a@example.com", strings.Repeat("x", 73), ErrLongPassword},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := newTestService(t, newMemRepo())
-
-			_, _, err := s.Register(context.Background(), tt.user, tt.email, tt.password)
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("got %v, want %v", err, tt.want)
-			}
-		})
-	}
-}
-
-func TestRegisterDuplicate(t *testing.T) {
-	s := newTestService(t, newMemRepo())
 	ctx := context.Background()
 
-	if _, _, err := s.Register(ctx, "krost", "krost@example.com", "password123"); err != nil {
-		t.Fatalf("first Register: %v", err)
-	}
-
-	_, _, err := s.Register(ctx, "krost", "other@example.com", "password123")
-	if !errors.Is(err, ErrUserExists) {
-		t.Fatalf("got %v, want ErrUserExists", err)
-	}
-}
-
-func TestLogin(t *testing.T) {
-	s := newTestService(t, newMemRepo())
-	ctx := context.Background()
-
-	if _, _, err := s.Register(ctx, "krost", "krost@example.com", "password123"); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
+	addUser(t, repo, "krost", "krost@example.com", "password123")
 
 	t.Run("by name", func(t *testing.T) {
 		user, token, err := s.Login(ctx, "krost", "password123")
@@ -239,9 +187,11 @@ func TestAuthenticate(t *testing.T) {
 	s := newTestService(t, repo)
 	ctx := context.Background()
 
-	user, token, err := s.Register(ctx, "krost", "krost@example.com", "password123")
+	user := addUser(t, repo, "krost", "krost@example.com", "password123")
+
+	token, err := s.GenerateToken(user.ID, user.Name)
 	if err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("GenerateToken: %v", err)
 	}
 
 	t.Run("valid token", func(t *testing.T) {

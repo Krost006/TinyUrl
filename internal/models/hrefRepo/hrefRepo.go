@@ -30,6 +30,14 @@ type HrefRepo interface {
 	// идут одной транзакцией. Возвращает ID созданной ссылки.
 	CreateHref(ctx context.Context, userID int, href *models.Href) (int, error)
 
+	// CreateSlot создаёт пустой слот с указанным кодом и привязывает его к
+	// пользователю. Слот — это короткая ссылка без длинного адреса
+	// (long_url IS NULL), которую пользователь заполнит позже.
+	//
+	// Если код уже занят, возвращает repo.ErrAlreadyExists: вызывающий должен
+	// сгенерировать другой код и повторить.
+	CreateSlot(ctx context.Context, userID int, code string) (int, error)
+
 	// ListByUser возвращает ссылки пользователя, новые первыми.
 	ListByUser(ctx context.Context, userID int) ([]models.Href, error)
 
@@ -39,14 +47,27 @@ type HrefRepo interface {
 	// DeleteByUser удаляет ссылку, если она принадлежит этому пользователю.
 	// Чужую ссылку удалить нельзя: вернётся repo.ErrNotFound.
 	DeleteByUser(ctx context.Context, userID, hrefID int) error
+
+	// WithTx возвращает тот же репозиторий, но выполняющий запросы внутри
+	// переданной транзакции.
+	WithTx(tx pgx.Tx) HrefRepo
 }
 
 func NewHrefRepo(pool *pgxpool.Pool) HrefRepo {
-	return &pgxHrefRepo{pool}
+	return &pgxHrefRepo{ex: pool, pool: pool}
 }
 
 type pgxHrefRepo struct {
+	ex repo.Executor
+
+	// pool нужен только методам, которые сами открывают транзакцию.
+	// У репозитория, полученного через WithTx, он nil: вложенная транзакция
+	// не нужна, снаружи уже есть своя.
 	pool *pgxpool.Pool
+}
+
+func (r *pgxHrefRepo) WithTx(tx pgx.Tx) HrefRepo {
+	return &pgxHrefRepo{ex: tx}
 }
 
 // hrefColumns перечисляем явно: SELECT * сломается при добавлении колонки.
@@ -85,7 +106,7 @@ func (r *pgxHrefRepo) GetHrefByUserAndLongURL(ctx context.Context, userID int, l
 func (r *pgxHrefRepo) getHref(ctx context.Context, query string, args ...any) (*models.Href, error) {
 	h := models.Href{}
 
-	err := r.pool.QueryRow(ctx, query, args...).Scan(&h.ID, &h.URL, &h.LongURL)
+	err := r.ex.QueryRow(ctx, query, args...).Scan(&h.ID, &h.URL, &h.LongURL)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, repo.ErrNotFound
@@ -98,8 +119,16 @@ func (r *pgxHrefRepo) getHref(ctx context.Context, query string, args ...any) (*
 }
 
 func (r *pgxHrefRepo) CreateHref(ctx context.Context, userID int, href *models.Href) (int, error) {
-	// Транзакция: без неё упавшая вставка в userhref оставила бы ссылку без
-	// владельца — она заняла бы короткий код, но не попала бы ни в чей список.
+	// Две вставки должны быть атомарны: иначе упавшая вставка в userhref
+	// оставила бы ссылку без владельца — она заняла бы короткий код, но не
+	// попала бы ни в чей список.
+	//
+	// Если репозиторий уже работает внутри чужой транзакции (pool == nil),
+	// открывать свою не нужно и нельзя — атомарность обеспечит вызывающий.
+	if r.pool == nil {
+		return r.createHref(ctx, r.ex, userID, href)
+	}
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -109,9 +138,30 @@ func (r *pgxHrefRepo) CreateHref(ctx context.Context, userID int, href *models.H
 	// поэтому defer безопасен и в удачном сценарии.
 	defer tx.Rollback(ctx)
 
+	id, err := r.createHref(ctx, tx, userID, href)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+
+	return id, nil
+}
+
+func (r *pgxHrefRepo) CreateSlot(ctx context.Context, userID int, code string) (int, error) {
+	// Пустой слот — это обычная ссылка с long_url = NULL, поэтому отдельного
+	// запроса не нужно: LongURL типа *string как раз и кладётся в базу как NULL.
+	return r.CreateHref(ctx, userID, &models.Href{URL: code})
+}
+
+// createHref выполняет обе вставки через переданный executor, не заботясь
+// о том, кто и где открыл транзакцию.
+func (r *pgxHrefRepo) createHref(ctx context.Context, ex repo.Executor, userID int, href *models.Href) (int, error) {
 	var id int
 
-	err = tx.QueryRow(ctx, `
+	err := ex.QueryRow(ctx, `
 		INSERT INTO href (url, long_url)
 		VALUES ($1, $2)
 		RETURNING id;`,
@@ -127,7 +177,7 @@ func (r *pgxHrefRepo) CreateHref(ctx context.Context, userID int, href *models.H
 		return 0, err
 	}
 
-	_, err = tx.Exec(ctx, `
+	_, err = ex.Exec(ctx, `
 		INSERT INTO userhref (user_id, href_id)
 		VALUES ($1, $2);`,
 		userID, id)
@@ -136,15 +186,11 @@ func (r *pgxHrefRepo) CreateHref(ctx context.Context, userID int, href *models.H
 		return 0, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return 0, err
-	}
-
 	return id, nil
 }
 
 func (r *pgxHrefRepo) ListByUser(ctx context.Context, userID int) ([]models.Href, error) {
-	rows, err := r.pool.Query(ctx, `
+	rows, err := r.ex.Query(ctx, `
 		SELECT h.id, h.url, h.long_url
 		FROM href h
 		JOIN userhref uh ON uh.href_id = h.id
@@ -180,7 +226,7 @@ func (r *pgxHrefRepo) ListByUser(ctx context.Context, userID int) ([]models.Href
 func (r *pgxHrefRepo) CountByUser(ctx context.Context, userID int) (int, error) {
 	var count int
 
-	err := r.pool.QueryRow(ctx, `
+	err := r.ex.QueryRow(ctx, `
 		SELECT count(*)
 		FROM userhref
 		WHERE user_id=$1;`,
@@ -194,7 +240,7 @@ func (r *pgxHrefRepo) DeleteByUser(ctx context.Context, userID, hrefID int) erro
 	// Удаляем саму href, а не только связь: короткий код должен освободиться.
 	// Строки в userhref и click уходят каскадом (ON DELETE CASCADE).
 	// Условие EXISTS не даёт удалить чужую ссылку.
-	tag, err := r.pool.Exec(ctx, `
+	tag, err := r.ex.Exec(ctx, `
 		DELETE FROM href
 		WHERE id=$1
 		  AND EXISTS (

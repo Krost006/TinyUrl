@@ -11,8 +11,10 @@ import (
 
 	"tinyURL/internal/config"
 	"tinyURL/internal/db"
+	hrefrepo "tinyURL/internal/models/hrefRepo"
 	userrepo "tinyURL/internal/models/userRepo"
 	"tinyURL/internal/services/auth"
+	"tinyURL/internal/services/registration"
 	transport "tinyURL/internal/transport/http"
 )
 
@@ -32,8 +34,11 @@ func Start() error {
 	}
 	defer pool.Close()
 
+	users := userrepo.NewUserRepo(pool)
+	hrefs := hrefrepo.NewHrefRepo(pool)
+
 	authService, err := auth.New(
-		userrepo.NewUserRepo(pool),
+		users,
 		cfg.JWTSecret,
 		auth.WithTokenTTL(cfg.TokenTTL),
 	)
@@ -41,8 +46,10 @@ func Start() error {
 		return err
 	}
 
+	registrationService := registration.New(pool, users, hrefs, authService)
+
 	mux := http.NewServeMux()
-	transport.NewAuthHandler(authService).Routes(mux)
+	transport.NewAuthHandler(authService, registrationService).Routes(mux)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

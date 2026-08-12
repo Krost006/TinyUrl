@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS href (
     id       SERIAL PRIMARY KEY,
     url      TEXT NOT NULL UNIQUE,
-    long_url TEXT NOT NULL
+    long_url TEXT
 );
 
 CREATE TABLE IF NOT EXISTS userhref (
