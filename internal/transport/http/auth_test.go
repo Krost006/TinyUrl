@@ -93,7 +93,7 @@ func newTestServer(t *testing.T) (http.Handler, *memRepo) {
 	}
 
 	mux := http.NewServeMux()
-	NewAuthHandler(service, nil).Routes(mux)
+	NewAuthHandler(service, nil, NewAuth(service)).Routes(mux)
 
 	return mux, users
 }

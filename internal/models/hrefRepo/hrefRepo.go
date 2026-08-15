@@ -44,9 +44,9 @@ type HrefRepo interface {
 	// CountByUser возвращает число ссылок пользователя — для проверки лимита.
 	CountByUser(ctx context.Context, userID int) (int, error)
 
-	// DeleteByUser удаляет ссылку, если она принадлежит этому пользователю.
-	// Чужую ссылку удалить нельзя: вернётся repo.ErrNotFound.
-	DeleteByUser(ctx context.Context, userID, hrefID int) error
+	ClearSlot(ctx context.Context, userID, hrefID int) error
+
+	FillSlot(ctx context.Context, userID, hrefID int, longURL string) error
 
 	// WithTx возвращает тот же репозиторий, но выполняющий запросы внутри
 	// переданной транзакции.
@@ -195,7 +195,7 @@ func (r *pgxHrefRepo) ListByUser(ctx context.Context, userID int) ([]models.Href
 		FROM href h
 		JOIN userhref uh ON uh.href_id = h.id
 		WHERE uh.user_id=$1
-		ORDER BY h.id DESC;`,
+		ORDER BY h.id;`,
 		userID)
 
 	if err != nil {
@@ -236,27 +236,123 @@ func (r *pgxHrefRepo) CountByUser(ctx context.Context, userID int) (int, error) 
 	return count, err
 }
 
-func (r *pgxHrefRepo) DeleteByUser(ctx context.Context, userID, hrefID int) error {
-	// Удаляем саму href, а не только связь: короткий код должен освободиться.
-	// Строки в userhref и click уходят каскадом (ON DELETE CASCADE).
-	// Условие EXISTS не даёт удалить чужую ссылку.
-	tag, err := r.ex.Exec(ctx, `
-		DELETE FROM href
-		WHERE id=$1
-		  AND EXISTS (
-			SELECT 1 FROM userhref
-			WHERE href_id=$1 AND user_id=$2
-		  );`,
-		hrefID, userID)
+func (r *pgxHrefRepo) FillSlot(ctx context.Context, userID, hrefID int, longURL string) error {
+	if r.pool == nil {
+		return fillSlot(ctx, r.ex, userID, hrefID, longURL)
+	}
 
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Ноль удалённых строк — ссылки нет или она чужая. Наружу это одно и то же:
-	// иначе перебором ID можно узнать, какие ссылки существуют у других.
+	defer tx.Rollback(ctx)
+
+	if err := fillSlot(ctx, tx, userID, hrefID, longURL); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func fillSlot(ctx context.Context, ex repo.Executor, userID, hrefID int, longURL string) error {
+	// Условие IS DISTINCT FROM нельзя ставить прямо в UPDATE: тогда ноль
+	// затронутых строк означал бы сразу и "слота нет или он чужой", и "адрес
+	// тот же самый" — а это ошибка и успех соответственно.
+	//
+	// Поэтому сначала читаем текущий адрес. Запрос идёт внутри той же
+	// транзакции, что и UPDATE, так что между ними ничего не вклинится.
+	var current *string
+
+	err := ex.QueryRow(ctx, `
+		SELECT long_url
+		FROM href
+		WHERE id=$1
+		AND EXISTS(
+			SELECT 1
+			FROM userhref
+			WHERE href_id=$1 AND user_id=$2);
+		`, hrefID, userID).Scan(&current)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Слота нет либо он принадлежит другому пользователю. Наружу это одна
+		// ошибка: иначе перебором ID можно узнать, какие слоты существуют.
+		return repo.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	// Адрес не меняется — статистику сбрасывать не за что.
+	if current != nil && *current == longURL {
+		return nil
+	}
+
+	_, err = ex.Exec(ctx, `
+		UPDATE href
+		SET long_url=$2
+		WHERE id=$1;
+		`, hrefID, longURL)
+	if err != nil {
+		return err
+	}
+
+	// Клики привязаны к конкретному адресу: сменился адрес — статистика
+	// от прошлого больше не имеет смысла.
+	_, err = ex.Exec(ctx, `
+		DELETE FROM click
+		WHERE href_id=$1;
+		`, hrefID)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *pgxHrefRepo) ClearSlot(ctx context.Context, userID, hrefID int) error {
+	if r.pool == nil {
+		return clearSlot(ctx, r.ex, userID, hrefID)
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer tx.Rollback(ctx)
+
+	if err = clearSlot(ctx, tx, userID, hrefID); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func clearSlot(ctx context.Context, ex repo.Executor, userID, hrefID int) error {
+	tag, err := ex.Exec(ctx, `
+		UPDATE href
+		SET long_url=NULL
+		WHERE id=$1
+		AND EXISTS(
+			SELECT 1
+			FROM userhref
+			WHERE href_id=$1 AND user_id=$2);
+		`, hrefID, userID)
+	if err != nil {
+		return err
+	}
+
 	if tag.RowsAffected() == 0 {
 		return repo.ErrNotFound
+	}
+
+	_, err = ex.Exec(ctx, `
+		DELETE FROM click
+		WHERE href_id=$1;
+		`, hrefID)
+	if err != nil {
+		return err
 	}
 
 	return nil

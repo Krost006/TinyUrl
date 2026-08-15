@@ -15,6 +15,7 @@ import (
 	userrepo "tinyURL/internal/models/userRepo"
 	"tinyURL/internal/services/auth"
 	"tinyURL/internal/services/registration"
+	"tinyURL/internal/services/shorting"
 	transport "tinyURL/internal/transport/http"
 )
 
@@ -48,8 +49,18 @@ func Start() error {
 
 	registrationService := registration.New(pool, users, hrefs, authService)
 
+	host, err := cfg.Host()
+	if err != nil {
+		return err
+	}
+
+	shortingService := shorting.New(hrefs, host)
+
+	authMiddleware := transport.NewAuth(authService)
+
 	mux := http.NewServeMux()
-	transport.NewAuthHandler(authService, registrationService).Routes(mux)
+	transport.NewAuthHandler(authService, registrationService, authMiddleware).Routes(mux)
+	transport.NewSlotHandler(shortingService, authMiddleware, cfg.BaseURL).Routes(mux)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.ServerPort,

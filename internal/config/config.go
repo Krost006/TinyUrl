@@ -2,7 +2,9 @@ package config
 
 import (
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -11,6 +13,11 @@ type Config struct {
 	DBURL      string
 	JWTSecret  string
 	TokenTTL   time.Duration
+
+	// BaseURL — адрес, по которому сервис доступен снаружи, например
+	// "https://short.ly". Нужен, чтобы отдавать клиенту готовую короткую
+	// ссылку, а не голый код.
+	BaseURL string
 }
 
 // ErrNoJWTSecret — сервис не должен подниматься с пустым или дефолтным ключом
@@ -19,12 +26,19 @@ var ErrNoJWTSecret = errors.New("JWT_SECRET is required")
 
 var ErrNoDBURL = errors.New("DBURL is required")
 
+// ErrBadBaseURL — BASE_URL задан, но это не абсолютный http(s)-адрес.
+var ErrBadBaseURL = errors.New("BASE_URL must be an absolute http(s) URL")
+
 func LoadConfig() (Config, error) {
+	port := getEnv("PORT", "8080")
+
 	c := Config{
-		ServerPort: getEnv("PORT", "8080"),
+		ServerPort: port,
 		DBURL:      getEnv("DBURL", ""),
 		JWTSecret:  getEnv("JWT_SECRET", ""),
 		TokenTTL:   getDuration("TOKEN_TTL", 24*time.Hour),
+		// Для разработки хватает локального адреса, в проде BASE_URL задают явно.
+		BaseURL: strings.TrimRight(getEnv("BASE_URL", "http://localhost:"+port), "/"),
 	}
 
 	if c.DBURL == "" {
@@ -35,7 +49,25 @@ func LoadConfig() (Config, error) {
 		return Config{}, ErrNoJWTSecret
 	}
 
+	if _, err := c.Host(); err != nil {
+		return Config{}, err
+	}
+
 	return c, nil
+}
+
+// Host возвращает хост сервиса без схемы — в таком виде его сравнивают с хостом
+// сокращаемой ссылки, чтобы не дать зациклить редирект.
+//
+// Заодно проверяет, что BaseURL вообще пригоден: поэтому LoadConfig зовёт Host
+// на старте, а не ждёт первого запроса.
+func (c Config) Host() (string, error) {
+	u, err := url.Parse(c.BaseURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", ErrBadBaseURL
+	}
+
+	return u.Host, nil
 }
 
 func getEnv(vari, def string) string {

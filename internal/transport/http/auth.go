@@ -25,17 +25,18 @@ const maxBodySize = 1 << 20 // 1 MiB
 type AuthHandler struct {
 	service      *auth.Service
 	registration *registration.Service
+	auth         *Auth
 }
 
-func NewAuthHandler(service *auth.Service, reg *registration.Service) *AuthHandler {
-	return &AuthHandler{service: service, registration: reg}
+func NewAuthHandler(service *auth.Service, reg *registration.Service, a *Auth) *AuthHandler {
+	return &AuthHandler{service: service, registration: reg, auth: a}
 }
 
-// Register навешивает ручки сервиса пользователей на мультиплексор.
+// Routes навешивает ручки сервиса пользователей на мультиплексор.
 func (h *AuthHandler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/register", h.register)
 	mux.HandleFunc("POST /api/auth/login", h.login)
-	mux.Handle("GET /api/auth/me", h.RequireAuth(http.HandlerFunc(h.me)))
+	mux.Handle("GET /api/auth/me", h.auth.RequireFunc(h.me))
 }
 
 type registerRequest struct {
