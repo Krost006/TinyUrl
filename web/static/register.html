@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Регистрация — tinyURL</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+    <nav class="nav">
+        <a class="logo" href="/">tinyURL</a>
+        <span id="nav-links"></span>
+    </nav>
+</header>
+
+<main class="narrow">
+    <h1>Регистрация</h1>
+    <p class="lead">После регистрации сразу появятся 10 свободных слотов.</p>
+
+    <div class="card">
+        <div id="message" class="message"></div>
+
+        <form id="form">
+            <div class="field">
+                <label for="name">Имя</label>
+                <input id="name" name="name" autocomplete="username" required>
+                <div class="hint">От 3 до 32 символов</div>
+            </div>
+
+            <div class="field">
+                <label for="email">Почта</label>
+                <input id="email" name="email" type="email" autocomplete="email" required>
+            </div>
+
+            <div class="field">
+                <label for="password">Пароль</label>
+                <input id="password" name="password" type="password" autocomplete="new-password" required>
+                <div class="hint">Не короче 8 символов</div>
+            </div>
+
+            <button type="submit" class="wide" id="submit">Зарегистрироваться</button>
+        </form>
+
+        <p class="hint" style="margin-top:16px">Уже есть аккаунт? <a href="/login.html">Войти</a></p>
+    </div>
+</main>
+
+<script src="/static/app.js"></script>
+<script>
+    const form = document.getElementById("form");
+    const submit = document.getElementById("submit");
+
+    form.addEventListener("submit", (e) => {
+        e.preventDefault();
+
+        submitForm(submit, async () => {
+            const data = await api("POST", "/api/auth/register", {
+                name: form.name.value,
+                email: form.email.value,
+                password: form.password.value,
+            });
+
+            // Регистрация сразу возвращает токен — второй раз логиниться не нужно.
+            auth.save(data.token, data.user);
+            location.href = "/dashboard.html";
+        });
+    });
+</script>
+</body>
+</html>

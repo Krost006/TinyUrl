@@ -18,6 +18,9 @@ type Config struct {
 	// "https://short.ly". Нужен, чтобы отдавать клиенту готовую короткую
 	// ссылку, а не голый код.
 	BaseURL string
+
+	// WebDir — каталог с файлами фронтенда.
+	WebDir string
 }
 
 // ErrNoJWTSecret — сервис не должен подниматься с пустым или дефолтным ключом
@@ -39,6 +42,7 @@ func LoadConfig() (Config, error) {
 		TokenTTL:   getDuration("TOKEN_TTL", 24*time.Hour),
 		// Для разработки хватает локального адреса, в проде BASE_URL задают явно.
 		BaseURL: strings.TrimRight(getEnv("BASE_URL", "http://localhost:"+port), "/"),
+		WebDir:  getEnv("WEB_DIR", "web"),
 	}
 
 	if c.DBURL == "" {

@@ -1,4 +1,6 @@
-package app
+// Package redirect собирает и запускает сервис редиректов — второй бинарник
+// проекта, рассчитанный на отдельный контейнер.
+package redirect
 
 import (
 	"context"
@@ -11,12 +13,10 @@ import (
 
 	"tinyURL/internal/config"
 	"tinyURL/internal/db"
+	clickrepo "tinyURL/internal/models/clickRepo"
 	hrefrepo "tinyURL/internal/models/hrefRepo"
-	userrepo "tinyURL/internal/models/userRepo"
-	"tinyURL/internal/services/auth"
-	"tinyURL/internal/services/registration"
-	"tinyURL/internal/services/shorting"
-	transport "tinyURL/internal/transport/http"
+	redirectsvc "tinyURL/internal/services/redirect"
+	transport "tinyURL/internal/transport/redirect"
 )
 
 func Start() error {
@@ -25,7 +25,6 @@ func Start() error {
 		return err
 	}
 
-	// Контекст живёт до Ctrl+C или SIGTERM — по нему гасим сервер.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -35,33 +34,15 @@ func Start() error {
 	}
 	defer pool.Close()
 
-	users := userrepo.NewUserRepo(pool)
-	hrefs := hrefrepo.NewHrefRepo(pool)
-
-	authService, err := auth.New(
-		users,
-		cfg.JWTSecret,
-		auth.WithTokenTTL(cfg.TokenTTL),
+	// Обратите внимание, чего здесь нет: userrepo, auth, registration,
+	// shorting. Пока список импортов такой, сервис действительно отделим.
+	service := redirectsvc.New(
+		hrefrepo.NewHrefRepo(pool),
+		clickrepo.NewClickRepo(pool),
 	)
-	if err != nil {
-		return err
-	}
-
-	registrationService := registration.New(pool, users, hrefs, authService)
-
-	host, err := cfg.Host()
-	if err != nil {
-		return err
-	}
-
-	shortingService := shorting.New(hrefs, host)
-
-	authMiddleware := transport.NewAuth(authService)
 
 	mux := http.NewServeMux()
-	transport.NewAuthHandler(authService, registrationService, authMiddleware).Routes(mux)
-	transport.NewSlotHandler(shortingService, authMiddleware, cfg.BaseURL).Routes(mux)
-	transport.NewStaticHandler(cfg.WebDir).Routes(mux)
+	transport.NewHandler(service).Routes(mux)
 
 	server := &http.Server{
 		Addr:              ":" + cfg.ServerPort,
@@ -75,7 +56,7 @@ func Start() error {
 	errCh := make(chan error, 1)
 
 	go func() {
-		log.Printf("listening on %s", server.Addr)
+		log.Printf("redirect listening on %s", server.Addr)
 
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

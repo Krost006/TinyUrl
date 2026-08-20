@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Вход — tinyURL</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+    <nav class="nav">
+        <a class="logo" href="/">tinyURL</a>
+        <span id="nav-links"></span>
+    </nav>
+</header>
+
+<main class="narrow">
+    <h1>Вход</h1>
+
+    <div class="card">
+        <div id="message" class="message"></div>
+
+        <form id="form">
+            <div class="field">
+                <label for="login">Имя или почта</label>
+                <input id="login" name="login" autocomplete="username" required>
+            </div>
+
+            <div class="field">
+                <label for="password">Пароль</label>
+                <input id="password" name="password" type="password" autocomplete="current-password" required>
+            </div>
+
+            <button type="submit" class="wide" id="submit">Войти</button>
+        </form>
+
+        <p class="hint" style="margin-top:16px">Нет аккаунта? <a href="/register.html">Зарегистрироваться</a></p>
+    </div>
+</main>
+
+<script src="/static/app.js"></script>
+<script>
+    const form = document.getElementById("form");
+    const submit = document.getElementById("submit");
+
+    form.addEventListener("submit", (e) => {
+        e.preventDefault();
+
+        submitForm(submit, async () => {
+            // Сервис принимает в поле login и имя, и почту.
+            const data = await api("POST", "/api/auth/login", {
+                login: form.login.value,
+                password: form.password.value,
+            });
+
+            auth.save(data.token, data.user);
+            location.href = "/dashboard.html";
+        });
+    });
+</script>
+</body>
+</html>

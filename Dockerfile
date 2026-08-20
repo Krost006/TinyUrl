@@ -1,6 +1,12 @@
+# Один Dockerfile на оба сервиса: они отличаются только точкой входа.
+# Какую собирать — задаёт build-arg TARGET (см. docker-compose.yml).
+ARG TARGET=api
+
 # Сборка отделена от запуска: в финальный образ не едут ни компилятор,
 # ни исходники — только бинарник.
 FROM golang:1.25-alpine AS build
+
+ARG TARGET
 
 WORKDIR /src
 
@@ -13,7 +19,7 @@ COPY . .
 
 # CGO выключен, чтобы бинарник был статическим: иначе он потребует libc той
 # системы, где собирался, и не запустится в другом образе.
-RUN CGO_ENABLED=0 go build -o /bin/tinyurl ./cmd
+RUN CGO_ENABLED=0 go build -o /bin/service ./cmd/${TARGET}
 
 FROM alpine:3.20
 
@@ -26,8 +32,12 @@ RUN apk add --no-cache ca-certificates
 RUN adduser -D -u 10001 app
 USER app
 
-COPY --from=build /bin/tinyurl /bin/tinyurl
+COPY --from=build /bin/service /bin/service
+
+# Фронтенд нужен только сервису api, но копируем в оба образа: отдельный
+# Dockerfile ради нескольких килобайт статики не окупается.
+COPY web /web
 
 EXPOSE 8080
 
-ENTRYPOINT ["/bin/tinyurl"]
+ENTRYPOINT ["/bin/service"]

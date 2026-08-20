@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>tinyURL — сокращатель ссылок</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+    <nav class="nav">
+        <a class="logo" href="/">tinyURL</a>
+        <span id="nav-links"></span>
+    </nav>
+</header>
+
+<main>
+    <h1>Короткие ссылки</h1>
+    <p class="lead">Каждому пользователю выдаётся десять слотов. Впишите в слот длинный адрес — и короткая ссылка начнёт на него вести.</p>
+
+    <div class="card">
+        <h2 style="margin-top:0">Как это работает</h2>
+        <ol>
+            <li>Регистрируетесь — сразу получаете 10 коротких ссылок.</li>
+            <li>Вписываете в любую из них длинный адрес.</li>
+            <li>Делитесь короткой ссылкой, переходы считаются.</li>
+        </ol>
+        <p class="hint">Адрес в слоте можно поменять в любой момент или очистить, чтобы освободить слот.</p>
+
+        <div id="cta" style="margin-top:20px"></div>
+    </div>
+</main>
+
+<script src="/static/app.js"></script>
+<script>
+    // Кнопка зависит от того, вошёл ли уже пользователь.
+    document.addEventListener("DOMContentLoaded", () => {
+        const cta = document.getElementById("cta");
+
+        cta.innerHTML = auth.isLoggedIn()
+            ? `<a href="/dashboard.html"><button>Мои ссылки</button></a>`
+            : `<a href="/register.html"><button>Начать</button></a>`;
+    });
+</script>
+</body>
+</html>

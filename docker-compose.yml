@@ -12,32 +12,65 @@ services:
       # нужно удалить том: docker compose down -v
       - ./internal/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     ports:
-      # Наружу — чтобы можно было подключиться psql'ом с хоста. 5433, а не 5432:
-      # на хосте обычно уже стоит свой PostgreSQL и занимает штатный порт.
-      # Приложению этот проброс не нужен, оно ходит к базе внутри compose-сети.
-      - "5433:5432"
+      # 5433, а не 5432: на хосте обычно уже стоит свой PostgreSQL и занимает
+      # штатный порт. Приложениям этот проброс не нужен, они ходят к базе
+      # внутри compose-сети — он только чтобы подключаться psql'ом с хоста.
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tinyurl -d tinyurl"]
       interval: 2s
       timeout: 3s
       retries: 15
 
-  app:
-    build: .
+  # Бэкенд сайта: регистрация, вход, управление слотами.
+  api:
+    build:
+      context: .
+      args:
+        TARGET: api
     environment:
       # Хост базы — имя сервиса: внутри compose-сети docker резолвит его в
       # адрес контейнера.
       DBURL: postgres://tinyurl:tinyurl@db:5432/tinyurl?sslmode=disable
       JWT_SECRET: dev-secret-change-me
       PORT: "8080"
-      BASE_URL: http://localhost:8080
+      # Адрес, по которому доступны короткие ссылки, — то есть сервис
+      # редиректов, а не сам api. Отсюда же берётся хост для проверки
+      # самоссылок. Когда появится домен, здесь будет он.
+      BASE_URL: http://localhost:8081
+      WEB_DIR: /web
     ports:
-      - "8080:8080"
+      # Только на loopback: наружу сервисы выставляет системный nginx,
+      # напрямую из интернета они доступны быть не должны.
+      - "127.0.0.1:8080:8080"
     depends_on:
       db:
         # Не просто "запустись после db", а "дождись, пока она начнёт отвечать":
         # контейнер стартует за секунды, а Postgres готов принимать соединения
         # позже. Без этого приложение упало бы на первом же Ping.
+        condition: service_healthy
+
+  # Переходы по коротким ссылкам. Отдельный сервис: ручка публичная,
+  # запросов на порядки больше, и масштабируется он независимо от api.
+  redirect:
+    build:
+      context: .
+      args:
+        TARGET: redirect
+    environment:
+      DBURL: postgres://tinyurl:tinyurl@db:5432/tinyurl?sslmode=disable
+      # Редиректу токены не нужны, но LoadConfig требует ключ для всех
+      # сервисов. Отдельный конфиг ради одного поля разводить не стали.
+      JWT_SECRET: dev-secret-change-me
+      PORT: "8080"
+      BASE_URL: http://localhost:8081
+    ports:
+      # Тоже только loopback, и здесь это критично: сервис доверяет заголовку
+      # X-Forwarded-For безусловно. Будь он доступен напрямую, любой мог бы
+      # записать в статистику произвольный IP.
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      db:
         condition: service_healthy
 
 volumes:

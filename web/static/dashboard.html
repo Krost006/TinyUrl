@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Мои ссылки — tinyURL</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+    <nav class="nav">
+        <a class="logo" href="/">tinyURL</a>
+        <span id="nav-links"></span>
+    </nav>
+</header>
+
+<main>
+    <h1>Мои ссылки</h1>
+    <p class="lead counter" id="counter">Загрузка…</p>
+
+    <div id="message" class="message"></div>
+
+    <div class="slots" id="slots"></div>
+</main>
+
+<script src="/static/app.js"></script>
+<script>
+    const slotsBox = document.getElementById("slots");
+    const counter = document.getElementById("counter");
+
+    // Слоты, как их отдал сервер. Держим в памяти, чтобы после каждого
+    // действия не перезагружать страницу целиком.
+    let slots = [];
+
+    async function load() {
+        clearMessage();
+
+        try {
+            const data = await api("GET", "/api/hrefs");
+            slots = data.slots;
+            counter.textContent = `Занято ${data.used} из ${data.total}`;
+            render();
+        } catch (err) {
+            showMessage(err.message);
+        }
+    }
+
+    function render() {
+        if (slots.length === 0) {
+            slotsBox.innerHTML = `<p class="empty-state">Слотов нет.</p>`;
+            return;
+        }
+
+        slotsBox.innerHTML = slots.map(renderSlot).join("");
+    }
+
+    function renderSlot(slot) {
+        const filled = Boolean(slot.long_url);
+
+        // escapeHtml обязателен: длинный адрес задаёт пользователь, и без
+        // экранирования он мог бы вставить в разметку что угодно.
+        const short = escapeHtml(slot.short_url);
+        const long = filled
+            ? `<a href="${escapeHtml(slot.long_url)}" class="slot-long" rel="noopener noreferrer" target="_blank">${escapeHtml(slot.long_url)}</a>`
+            : `<div class="slot-long empty">слот свободен</div>`;
+
+        const actions = filled
+            ? `<button class="secondary" data-act="edit" data-id="${slot.id}">Изменить</button>
+               <button class="danger" data-act="clear" data-id="${slot.id}">Очистить</button>`
+            : `<button data-act="edit" data-id="${slot.id}">Заполнить</button>`;
+
+        return `
+        <div class="slot ${filled ? "" : "free"}" data-slot="${slot.id}">
+            <div>
+                <div class="slot-short">${short}</div>
+                ${long}
+            </div>
+            <div class="slot-actions">${actions}</div>
+
+            <form class="slot-edit" data-id="${slot.id}" hidden>
+                <input type="url" placeholder="https://example.com/страница"
+                       value="${filled ? escapeHtml(slot.long_url) : ""}" required>
+                <button type="submit">Сохранить</button>
+                <button type="button" class="secondary" data-act="cancel">Отмена</button>
+            </form>
+        </div>`;
+    }
+
+    // Один обработчик на весь список вместо слушателя на каждой кнопке:
+    // разметка перерисовывается целиком, и вешать их заново пришлось бы
+    // после каждого действия.
+    slotsBox.addEventListener("click", async (e) => {
+        const button = e.target.closest("button[data-act]");
+        if (!button) return;
+
+        const act = button.dataset.act;
+        const card = button.closest(".slot");
+        const form = card.querySelector(".slot-edit");
+
+        if (act === "edit") {
+            form.hidden = false;
+            form.querySelector("input").focus();
+            return;
+        }
+
+        if (act === "cancel") {
+            form.hidden = true;
+            return;
+        }
+
+        if (act === "clear") {
+            if (!confirm("Очистить слот? Статистика переходов будет удалена.")) {
+                return;
+            }
+
+            await submitForm(button, async () => {
+                await api("DELETE", "/api/hrefs/" + button.dataset.id);
+                await load();
+                showMessage("Слот очищен", "ok");
+            });
+        }
+    });
+
+    slotsBox.addEventListener("submit", async (e) => {
+        e.preventDefault();
+
+        const form = e.target;
+        const button = form.querySelector('button[type="submit"]');
+        const value = form.querySelector("input").value;
+
+        await submitForm(button, async () => {
+            await api("PUT", "/api/hrefs/" + form.dataset.id, { long_url: value });
+            await load();
+            showMessage("Сохранено", "ok");
+        });
+    });
+
+    if (requireAuth()) {
+        load();
+    }
+</script>
+</body>
+</html>
