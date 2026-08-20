@@ -3,7 +3,7 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: tinyurl
-      POSTGRES_PASSWORD: tinyurl
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: tinyurl
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -12,17 +12,18 @@ services:
       # нужно удалить том: docker compose down -v
       - ./internal/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     ports:
-      # 5433, а не 5432: на хосте обычно уже стоит свой PostgreSQL и занимает
-      # штатный порт. Приложениям этот проброс не нужен, они ходят к базе
-      # внутри compose-сети — он только чтобы подключаться psql'ом с хоста.
+      # Только чтобы подключаться psql'ом с хоста; приложения ходят к базе
+      # внутри compose-сети. 5433, потому что на хосте обычно уже есть свой
+      # PostgreSQL на штатном порту.
       - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tinyurl -d tinyurl"]
       interval: 2s
       timeout: 3s
       retries: 15
+    restart: unless-stopped
 
-  # Бэкенд сайта: регистрация, вход, управление слотами.
+  # Бэкенд сайта: регистрация, вход, управление слотами, статика фронтенда.
   api:
     build:
       context: .
@@ -31,24 +32,28 @@ services:
     environment:
       # Хост базы — имя сервиса: внутри compose-сети docker резолвит его в
       # адрес контейнера.
-      DBURL: postgres://tinyurl:tinyurl@db:5432/tinyurl?sslmode=disable
-      JWT_SECRET: dev-secret-change-me
+      DBURL: postgres://tinyurl:${POSTGRES_PASSWORD}@db:5432/tinyurl?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET}
       PORT: "8080"
       # Адрес, по которому доступны короткие ссылки, — то есть сервис
       # редиректов, а не сам api. Отсюда же берётся хост для проверки
-      # самоссылок. Когда появится домен, здесь будет он.
-      BASE_URL: http://localhost:8081
+      # самоссылок.
+      BASE_URL: ${BASE_URL}
       WEB_DIR: /web
     ports:
+      # Слева — порт хоста, справа — порт внутри контейнера. Внутренний
+      # менять незачем, он ни с чем не пересекается.
+      #
       # Только на loopback: наружу сервисы выставляет системный nginx,
       # напрямую из интернета они доступны быть не должны.
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${API_PORT:-8090}:8080"
     depends_on:
       db:
         # Не просто "запустись после db", а "дождись, пока она начнёт отвечать":
         # контейнер стартует за секунды, а Postgres готов принимать соединения
         # позже. Без этого приложение упало бы на первом же Ping.
         condition: service_healthy
+    restart: unless-stopped
 
   # Переходы по коротким ссылкам. Отдельный сервис: ручка публичная,
   # запросов на порядки больше, и масштабируется он независимо от api.
@@ -58,20 +63,21 @@ services:
       args:
         TARGET: redirect
     environment:
-      DBURL: postgres://tinyurl:tinyurl@db:5432/tinyurl?sslmode=disable
+      DBURL: postgres://tinyurl:${POSTGRES_PASSWORD}@db:5432/tinyurl?sslmode=disable
       # Редиректу токены не нужны, но LoadConfig требует ключ для всех
       # сервисов. Отдельный конфиг ради одного поля разводить не стали.
-      JWT_SECRET: dev-secret-change-me
+      JWT_SECRET: ${JWT_SECRET}
       PORT: "8080"
-      BASE_URL: http://localhost:8081
+      BASE_URL: ${BASE_URL}
     ports:
       # Тоже только loopback, и здесь это критично: сервис доверяет заголовку
       # X-Forwarded-For безусловно. Будь он доступен напрямую, любой мог бы
       # записать в статистику произвольный IP.
-      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:${REDIRECT_PORT:-8091}:8080"
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:
